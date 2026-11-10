@@ -1,0 +1,53 @@
+diff --git a/packages/muya/src/utils/marked/getHighlightHtml.ts b/packages/muya/src/utils/marked/getHighlightHtml.ts
+index 2a2e6cd2..4d09602e 100644
+--- a/packages/muya/src/utils/marked/getHighlightHtml.ts
++++ b/packages/muya/src/utils/marked/getHighlightHtml.ts
+@@ -1,7 +1,12 @@
+ import type { ILexOption } from './types';
+ import { Marked } from 'marked';
+ import { markedHighlight } from 'marked-highlight';
+-import Prism from 'prismjs';
++import PrismImported from 'prismjs';
++
++// Use the shared global instance (see utils/prism/index.ts): language
++// components register on window.Prism, and web builds can produce more than
++// one physical prismjs copy.
++const Prism = ((typeof window !== 'undefined' && (window as unknown as { Prism?: typeof PrismImported }).Prism) || PrismImported)!;
+ import compactNestedLists from './compactNestedLists';
+ import emojiExtension from './extensions/emoji';
+ import fancyListsHtmlExtension from './extensions/fancyListsHtml';
+diff --git a/packages/muya/src/utils/prism/index.ts b/packages/muya/src/utils/prism/index.ts
+index 2ed390ce..e5bd548c 100644
+--- a/packages/muya/src/utils/prism/index.ts
++++ b/packages/muya/src/utils/prism/index.ts
+@@ -3,8 +3,12 @@ import Prism from 'prismjs';
+ import { languages } from 'prismjs/components.js';
+ import initLoadLanguage, { loadedLanguages, transformAliasToOrigin } from './loadLanguage';
+ 
+-const prism = Prism;
+-window.Prism = Prism;
++// Web builds may resolve multiple physical prismjs copies (pnpm paths +
++// bundler query variants). Always normalize onto a single shared instance:
++// the window global. The first instance to load defines it; every other
++// consumer reads/writes the same object, keeping the language registry
++// coherent regardless of chunk evaluation order.
++const prism = (window.Prism = window.Prism || Prism);
+ import('prismjs/plugins/keep-markup/prism-keep-markup');
+ 
+ // Prism omits c++/h++ aliases; register them once on the shared language table (#2910).
+diff --git a/packages/muya/src/utils/prism/loadLanguage.ts b/packages/muya/src/utils/prism/loadLanguage.ts
+index 1301541b..96c9f542 100644
+--- a/packages/muya/src/utils/prism/loadLanguage.ts
++++ b/packages/muya/src/utils/prism/loadLanguage.ts
+@@ -51,6 +51,11 @@ interface IPrismLike {
+ }
+ 
+ function initLoadLanguage(Prism: IPrismLike) {
++    // Normalize onto the shared global instance when one exists (web builds
++    // can hold several prismjs copies; see utils/prism/index.ts).
++    const shared = (typeof window !== 'undefined' && (window as unknown as { Prism?: IPrismLike }).Prism) || Prism;
++    Object.assign(shared.languages, Prism.languages);
++    Prism = shared;
+     return async function loadLanguages(langs?: string[] | string) {
+         if (!langs)
+             langs = Object.keys(languages).filter(lang => lang !== 'meta');

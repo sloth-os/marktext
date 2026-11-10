@@ -1,0 +1,13 @@
+diff --git a/packages/desktop/src/renderer/src/components/titleBar/index.vue b/packages/desktop/src/renderer/src/components/titleBar/index.vue
+index 6256c73e..99f34de1 100644
+--- a/packages/desktop/src/renderer/src/components/titleBar/index.vue
++++ b/packages/desktop/src/renderer/src/components/titleBar/index.vue
+@@ -386,7 +386,7 @@ div.title > span > .path > bdi > span {
+   visibility: visible;
+ }
+ .title:hover {
+-  color: var(sideBarTitleColor);
++  color: var(--sideBarTitleColor);
+ }
+ 
+ .left-toolbar {

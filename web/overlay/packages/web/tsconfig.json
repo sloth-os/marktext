@@ -1,0 +1,27 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable", "WebWorker"],
+    "types": ["vite/client"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "verbatimModuleSyntax": false,
+    "jsx": "preserve",
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["../../desktop/src/renderer/src/*"],
+      "common/*": ["../../desktop/src/common/*"],
+      "@shared/*": ["../../desktop/src/shared/*"],
+      "pathe": ["src/web-shim/nodePath.ts"],
+      "electron-log": ["src/electron-log-shim.ts"]
+    }
+  },
+  "include": ["src/**/*.ts", "vite.config.mts"]
+}

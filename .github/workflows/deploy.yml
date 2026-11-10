@@ -1,0 +1,174 @@
+name: Deploy MarkText Web to GitHub Pages
+
+# Builds the MarkText web PWA from the upstream monorepo (latest develop)
+# overlaid with this repository's patches, and publishes it to GitHub Pages
+# on a weekly schedule and on demand.
+
+on:
+  schedule:
+    # Every Monday 03:00 UTC — "publish the marktext weekly".
+    - cron: '0 3 * * 1'
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Upstream marktext ref (branch, tag or SHA) to build'
+        required: false
+        default: 'develop'
+        type: string
+  push:
+    branches:
+      - main
+    paths:
+      - 'web/**'
+      - 'patches/**'
+      - 'scripts/**'
+      - '.github/workflows/deploy.yml'
+
+# Permissions for GITHUB_TOKEN: read repo, deploy to Pages, update statuses.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time; a queued run supersedes older pending ones.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  MARKTEXT_URL: https://github.com/marktext/marktext.git
+  FORCE_COLOR: 1
+
+jobs:
+  build:
+    name: Build web bundle
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      UPSTREAM_COMMIT: ${{ env.UPSTREAM_COMMIT }}
+    steps:
+      - name: Check out this repository
+        uses: actions/checkout@v4
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: marktext/pnpm-lock.yaml
+
+      - name: Check out upstream MarkText
+        run: |
+          REF="${{ inputs.ref || 'develop' }}"
+          echo "Building upstream MarkText ref: $REF"
+          # Full clone of just the ref we need (workflow_dispatch may pin a
+          # SHA or tag, which a shallow branch clone cannot resolve).
+          git clone --filter=blob:none --no-checkout "$MARKTEXT_URL" marktext
+          cd marktext
+          git checkout "$REF"
+          echo "UPSTREAM_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+          echo "Upstream commit: $(git rev-parse HEAD)"
+
+      - name: Record build metadata
+        run: |
+          echo "Built from marktext/marktext@${UPSTREAM_COMMIT} on $(date -u +%Y-%m-%dT%H:%M:%SZ)" > marktext/BUILD_INFO.txt
+          echo "Weekly automated build by marktext-web" >> marktext/BUILD_INFO.txt
+
+      - name: Apply patches and web overlay
+        run: ./scripts/apply-patches.sh
+        env:
+          MARKTEXT_DIR: ${{ github.workspace }}/marktext
+
+      - name: Install dependencies
+        run: |
+          # Rewrite git-hosted deps (github:file-icons/atom) to HTTPS; SSH
+          # fetches would hang waiting for keys in CI.
+          git config --global url."https://github.com/".insteadOf "git@github.com:"
+          # Workspace install from the monorepo root: packages/web is part of
+          # packages/*, so one install covers desktop + muya + web.
+          corepack enable pnpm
+          pnpm install --ignore-scripts
+        working-directory: marktext
+        env:
+          CIX: 1
+
+      - name: Build the web bundle
+        run: |
+          # GitHub Pages serves a project site at /<repo>/ unless the
+          # repository is a user/organization site; derive the base from the
+          # repo name.
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          REPO_OWNER="${GITHUB_REPOSITORY%%/*}"
+          BASE="/${REPO_NAME}/"
+          if [ "$REPO_NAME" = "$REPO_OWNER.github.io" ]; then
+            BASE="/"
+          fi
+          echo "Building with base URL: $BASE"
+          cd marktext/packages/web
+          BASE_URL="$BASE" pnpm exec vite build
+        env:
+          MARKTEXT_DIR: ${{ github.workspace }}/marktext
+
+      - name: Verify PWA artifacts
+        run: |
+          test -f dist/index.html
+          test -f dist/manifest.webmanifest
+          test -f dist/sw.js
+          echo "Bundle size: $(du -sh dist | cut -f1)"
+          # The service worker must precache at least the app shell.
+          grep -q "precache" dist/sw.js || (echo "!! sw.js has no precache manifest" && exit 1)
+          python3 - <<'EOF'
+          import json
+          with open('dist/manifest.webmanifest') as f:
+              manifest = json.load(f)
+          assert manifest.get('file_handlers'), 'manifest.json missing file_handlers'
+          assert manifest.get('launch_handler'), 'manifest.json missing launch_handler'
+          assert any('maskable' in (i.get('purpose', '') or '') for i in manifest['icons']), 'missing maskable icon'
+          print('manifest OK:', len(manifest['icons']), 'icons,', len(manifest['file_handlers']), 'file handler(s)')
+          EOF
+
+      - name: Smoke test the built bundle
+        run: |
+          # Headless-browser smoke test: app mount, editor, menus, PWA
+          # service worker activation. Runs against the built dist/.
+          cd marktext/packages/web
+          npx playwright install chromium --with-deps || npx playwright install chromium
+          CHROMIUM_EXECUTABLE="$(find ~/.cache/ms-playwright -name chrome -type f | head -1)" \
+            node test/smoke.mjs "$GITHUB_WORKSPACE/marktext/dist"
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+          retention-days: 14
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+
+      - name: Deploy artifact to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+      - name: Deployment summary
+        run: |
+          echo "### MarkText Web deployed 🚀" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **URL**: ${{ steps.deployment.outputs.page_url }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Upstream**: [\`${UPSTREAM_COMMIT:0:10}\`](https://github.com/marktext/marktext/commit/${UPSTREAM_COMMIT})" >> $GITHUB_STEP_SUMMARY
+          echo "- **Schedule**: weekly (Mondays 03:00 UTC) + manual dispatch" >> $GITHUB_STEP_SUMMARY
+        env:
+          UPSTREAM_COMMIT: ${{ needs.build.outputs.UPSTREAM_COMMIT }}

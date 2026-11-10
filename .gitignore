@@ -1,0 +1,8 @@
+# Upstream checkout assembled by scripts/fetch-upstream.sh
+/marktext/
+
+# Build output
+/dist/
+
+# Build metadata recorded from the upstream checkout
+/.upstream-commit
