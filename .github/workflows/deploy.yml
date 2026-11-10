@@ -119,13 +119,14 @@ jobs:
 
       - name: Verify PWA artifacts
         run: |
+          cd marktext
           test -f dist/index.html
           test -f dist/manifest.webmanifest
           test -f dist/sw.js
           echo "Bundle size: $(du -sh dist | cut -f1)"
           # The service worker must precache at least the app shell.
           grep -q "precache" dist/sw.js || (echo "!! sw.js has no precache manifest" && exit 1)
-          python3 - <<'EOF'
+          python3 - <<'EOF2'
           import json
           with open('dist/manifest.webmanifest') as f:
               manifest = json.load(f)
@@ -133,7 +134,7 @@ jobs:
           assert manifest.get('launch_handler'), 'manifest.json missing launch_handler'
           assert any('maskable' in (i.get('purpose', '') or '') for i in manifest['icons']), 'missing maskable icon'
           print('manifest OK:', len(manifest['icons']), 'icons,', len(manifest['file_handlers']), 'file handler(s)')
-          EOF
+          EOF2
 
       - name: Smoke test the built bundle
         run: |
@@ -147,7 +148,7 @@ jobs:
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: dist
+          path: marktext/dist
           retention-days: 14
 
   deploy:
