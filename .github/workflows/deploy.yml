@@ -50,18 +50,6 @@ jobs:
       - name: Check out this repository
         uses: actions/checkout@v4
 
-      - name: Set up pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: pnpm
-          cache-dependency-path: marktext/pnpm-lock.yaml
-
       - name: Check out upstream MarkText
         run: |
           REF="${{ inputs.ref || 'develop' }}"
@@ -73,6 +61,19 @@ jobs:
           git checkout "$REF"
           echo "UPSTREAM_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
           echo "Upstream commit: $(git rev-parse HEAD)"
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      # Node after the upstream checkout so pnpm-lock.yaml exists for caching.
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: marktext/pnpm-lock.yaml
 
       - name: Record build metadata
         run: |
@@ -90,9 +91,11 @@ jobs:
           # fetches would hang waiting for keys in CI.
           git config --global url."https://github.com/".insteadOf "git@github.com:"
           # Workspace install from the monorepo root: packages/web is part of
-          # packages/*, so one install covers desktop + muya + web.
+          # packages/*, so one install covers desktop + muya + web. The
+          # upstream lockfile has no packages/web entry (it is overlaid by
+          # the previous step), so the lockfile must be allowed to update.
           corepack enable pnpm
-          pnpm install --ignore-scripts
+          pnpm install --ignore-scripts --no-frozen-lockfile
         working-directory: marktext
         env:
           CIX: 1
