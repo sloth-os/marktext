@@ -10,6 +10,14 @@ import { chromium } from '@playwright/test'
 const DIST = process.argv[2] || join(process.cwd(), 'dist')
 const PORT = 4317
 
+// The bundle may be built with a base path (GitHub Pages: /<repo>/). Detect
+// it from the built index.html so the test server strips it from request
+// paths — otherwise every asset request would404→index.html fallback.
+const indexHtml = await readFile(join(DIST, 'index.html'), 'utf8')
+const baseMatch = /(?:src|href)="\u002f([a-z0-9._-]+)\u002f(?:assets|registerSW\.js|manifest|sw\.js|icon|favicon)/i.exec(indexHtml)
+const BASE = baseMatch ? `/${baseMatch[1]}` : ''
+console.log(`serving base: '${BASE || '/'}'`)
+
 const MIME = {
   '.html': 'text/html; charset=utf-8',
   '.js': 'text/javascript',
@@ -29,6 +37,13 @@ const MIME = {
 const server = createServer(async(req, res) => {
   try {
     let pathname = decodeURIComponent(new URL(req.url ?? '/', 'http://localhost').pathname)
+    // Serve the SPA at both / and /<base>/ like GitHub Pages does.
+    if (BASE && pathname === '/') {
+      res.writeHead(302, { location: `${BASE}/` })
+ res.end()
+      return
+    }
+    if (BASE && pathname.startsWith(BASE)) pathname = pathname.slice(BASE.length) || '/'
     if (pathname.endsWith('/')) pathname += 'index.html'
     const file = normalize(join(DIST, pathname))
     if (!file.startsWith(DIST)) {
@@ -80,7 +95,7 @@ const check = (name, ok, detail = '') => {
 }
 
 try {
-  await page.goto(`http://localhost:${PORT}/`, { waitUntil: 'domcontentloaded', timeout: 30000 })
+  await page.goto(`http://localhost:${PORT}${BASE || ''}/`, { waitUntil: 'domcontentloaded', timeout: 30000 })
 
   // 1. Boot splash disappears and the app mounts.
   const appMounted = await page
