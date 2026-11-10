@@ -6,7 +6,8 @@ from the upstream monorepo and replaces the Electron main process with a
 browser shim, so the same editor runs at a URL, installs to your device, and
 works offline.
 
-**Live site**: published weekly to this repository's GitHub Pages URL by
+**Live site**: <https://sloth-os.github.io/marktext/> — published weekly
+(every Monday 03:00 UTC) and on every relevant push by
 [`.github/workflows/deploy.yml`](.github/workflows/deploy.yml).
 
 ## How it works
