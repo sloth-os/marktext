@@ -21,6 +21,11 @@ const search = params.toString()
 if (search && window.location.search !== `?${search}`) {
   window.history.replaceState(null, '', `${window.location.pathname}?${search}${window.location.hash}`)
 }
+// The desktop main process passes the window type in the URL ('editor', or
+// 'preference/<category>' for the settings window); the router's '/' redirect
+// keys off it, so a settings window boots straight onto the preference page
+// without ever mounting the editor App.
+const urlType = params.get('type') ?? 'editor'
 window.marktext = {
   initialState: {
     codeFontFamily: params.get('cff'),
@@ -31,8 +36,8 @@ window.marktext = {
     titleBarStyle: params.get('tbs')
   },
   env: {
-    type: 'editor',
-    windowId: 1,
+    type: urlType,
+    windowId: Number(params.get('wid')) || 1,
     userDataPath: '/marktext',
     paths: store
   }
@@ -104,35 +109,57 @@ async function start(): Promise<void> {
   app.mount('#app')
   revealApp()
 
-  // Web-only wiring once the app is up.
-  const { useCommandCenterStore } = await import('@mt/store/commandCenter')
-  const commandCenter = useCommandCenterStore(pinia)
-  await commandCenter.LISTEN_COMMAND_CENTER_BUS()
+  // The settings window (`type=preference/…`) mounts the Preference page
+  // instead of the editor App; it needs none of the editor wiring below.
+  const isEditorWindow = params.get('type') === 'editor'
 
-  attachGlobalShortcuts((commandId: string) => {
-    emitToRenderer('mt::execute-command-by-id', commandId)
-  })
+  if (isEditorWindow) {
+    // Web-only wiring once the app is up. Do NOT call
+    // LISTEN_COMMAND_CENTER_BUS here: app.vue's onMounted already ran it during
+    // app.mount above, and each extra call registers another ipc
+    // 'mt::execute-command-by-id' listener — every menu click and keyboard
+    // accelerator would then execute its command twice (one File > New Tab
+    // click created two documents).
+    attachGlobalShortcuts((commandId: string) => {
+      emitToRenderer('mt::execute-command-by-id', commandId)
+    })
 
-  // The settings route is opened in-place (no separate Electron window).
-  onAppCommand('open-settings', () => {
-    const routerInstance = app.config.globalProperties.$router as
-      | { push: (location: unknown) => void }
-      | undefined
-    routerInstance?.push('/preference/general')
-  })
+    // Desktop opens Preferences in a separate window; mirror that. Routing
+    // in-place instead unmounts the editor App, whose onMounted re-registers
+    // all of its ipc/bus listeners on every remount (they have no cleanup) —
+    // after one settings visit every menu command executed multiple times
+    // (a single File > New Tab click created four tabs).
+    onAppCommand('open-settings', () => {
+      const settingsParams = new URLSearchParams(window.location.search)
+      settingsParams.set('type', 'preference/general')
+      settingsParams.set('wid', '2')
+      // Keep the query (theme/font params, udp, wid) but drop the hash: the
+      // editor's `#/editor` route would mount the editor App in the new
+      // window too; without it the `/` redirect lands on `/preference/general`.
+      const opened = window.open(`${window.location.pathname}?${settingsParams.toString()}`, '_blank')
+      if (!opened) console.warn('[web] The Preferences window was blocked by the browser')
+    })
 
-  attachDropImport()
-  restoreProjectRoots()
+    attachDropImport()
+    restoreProjectRoots()
 
-  // Deliver initial keybindings + preferences like the desktop main process.
-  const { ipcRenderer } = window.electron
-  const bindings = (await ipcRenderer.invoke('mt::keybinding-get-pref-keybindings')) as {
-    defaultKeybindings: Record<string, string>
+    // Deliver initial keybindings + preferences like the desktop main process.
+    const { ipcRenderer } = window.electron
+    const bindings = (await ipcRenderer.invoke('mt::keybinding-get-pref-keybindings')) as {
+      defaultKeybindings: Record<string, string>
+      userKeybindings: Record<string, string>
+    }
+    // Custom user keybindings must win over the defaults: the command center
+    // already received the merged map via mt::request-keybindings during
+    // mount, and a defaults-only emit here would clobber it.
+    emitToRenderer('mt::keybindings-response', {
+      ...bindings.defaultKeybindings,
+      ...bindings.userKeybindings
+    })
+
+    const preferences = (await ipcRenderer.invoke('mt::preferences::get')) as Record<string, unknown>
+    emitToRenderer('mt::user-preference', preferences)
   }
-  emitToRenderer('mt::keybindings-response', bindings.defaultKeybindings)
-
-  const preferences = (await ipcRenderer.invoke('mt::preferences::get')) as Record<string, unknown>
-  emitToRenderer('mt::user-preference', preferences)
 }
 
 void start()

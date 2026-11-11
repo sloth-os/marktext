@@ -3,7 +3,8 @@
 // editor UI mounts, a new document can be created, and text can be typed.
 
 import { createServer } from 'node:http'
-import { readFile, stat } from 'node:fs/promises'
+import { readFile } from 'node:fs/promises'
+import { existsSync, readdirSync } from 'node:fs'
 import { extname, join, normalize } from 'node:path'
 import { chromium } from '@playwright/test'
 
@@ -71,11 +72,36 @@ const server = createServer(async(req, res) => {
 await new Promise((resolve) => server.listen(PORT, resolve))
 console.log(`serving ${DIST} at http://localhost:${PORT}`)
 
-// Use the locally cached Chromium build directly (executablePath) so the
-// test does not depend on a matching `playwright install` browser revision.
-const CHROMIUM = process.env.CHROMIUM_EXECUTABLE || (
-  await chromium.executablePath().catch(() => null)
-)
+// Use the locally cached Chromium build directly so the test does not depend
+// on a matching `playwright install` browser revision. Note:
+// `executablePath()` is synchronous in playwright 1.64 and points at the
+// revision this playwright version expects, which is often not the installed
+// one — so verify the path exists and otherwise fall back to scanning the
+// playwright cache for any usable Chromium binary.
+const resolveChromium = () => {
+  if (process.env.CHROMIUM_EXECUTABLE) return process.env.CHROMIUM_EXECUTABLE
+  try {
+    const candidate = chromium.executablePath()
+    if (typeof candidate === 'string' && existsSync(candidate)) return candidate
+  } catch {
+    // fall through to the cache scan below
+  }
+  const cache = join(process.env.HOME ?? '', '.cache', 'ms-playwright')
+  if (!existsSync(cache)) return null
+  const revisionDirs = readdirSync(cache)
+    .filter((name) => /^chromium(-\d+)?$/.test(name))
+    .sort()
+    .reverse()
+  for (const revisionDir of revisionDirs) {
+    for (const platform of readdirSync(join(cache, revisionDir))) {
+      // Linux layout: chromium-<rev>/chrome-linux[-arm64]/chrome
+      const candidate = join(cache, revisionDir, platform, 'chrome')
+      if (existsSync(candidate)) return candidate
+    }
+  }
+  return null
+}
+const CHROMIUM = resolveChromium()
 const browser = await chromium.launch({
   headless: true,
   ...(CHROMIUM ? { executablePath: CHROMIUM } : {})
@@ -184,22 +210,81 @@ try {
     check('application menu opens', menuVisible)
     if (menuVisible) {
       // Click File → New Tab to prove menu-driven commands work end to end.
+      const tabsBefore = await page.locator('.tabs-container li').count()
+      const firstTabId = await page.locator('.tabs-container li').first().getAttribute('data-id')
       await page.locator('.web-menu-item', { hasText: 'File' }).first().hover()
       await page.waitForTimeout(300)
       await page.locator('.web-submenu .web-menu-item', { hasText: 'New Tab' }).first().click()
       await page.waitForTimeout(600)
-      check('menu executes command', true)
+      // Regression (double command execution): one click must create exactly
+      // one new tab — the pre-fix build registered the command-center ipc
+      // listener twice, so a single click opened two documents.
+      const tabsAfter = await page.locator('.tabs-container li').count()
+      check('menu executes command', tabsAfter === tabsBefore + 1, `tabs ${tabsBefore} -> ${tabsAfter}`)
+      // Regression (invisible tab bar): the tab strip is the only way to
+      // switch documents on the web, so it must render with height.
+      const tabBarBox = await page.locator('.editor-tabs').boundingBox()
+      check('tab bar visible', (tabBarBox?.height ?? 0) > 0, `height=${tabBarBox?.height ?? 'none'}`)
+      // Regression ("if create new tab, cannot change to old tab"): click the
+      // original tab and verify it becomes the active one.
+      if (firstTabId && tabsAfter === tabsBefore + 1) {
+        const oldTab = page.locator(`.tabs-container li[data-id="${firstTabId}"]`)
+        await oldTab.click()
+        await page.waitForTimeout(800)
+        const oldTabActive = await oldTab.evaluate((li) => li.classList.contains('active'))
+        check('old tab becomes active after click', oldTabActive)
+      }
     }
     await page.keyboard.press('Escape')
   } else {
     check('application menu opens', false, 'menu button not found')
   }
 
-  // 8. Preferences open in-app (settings route).
-  await page.keyboard.press('Control+Comma')
-  await page.waitForTimeout(800)
-  const url = page.url()
-  check('preferences route reachable', url.includes('/preference'), `url=${url}`)
+  // 8. Preferences open in their own window (desktop parity) and never
+  // unmount the editor App. The old in-place route unmounted it, and the
+  // app's onMounted re-registered all ipc/bus listeners on every return —
+  // after one settings visit a single New Tab click created four tabs.
+  await menuButton.click()
+  await page.waitForTimeout(400)
+  const popupPromise = page.waitForEvent('popup', { timeout: 10000 })
+  await page.locator('.web-menu-item', { hasText: 'File' }).first().hover()
+  await page.waitForTimeout(300)
+  await page.locator('.web-submenu .web-menu-item', { hasText: 'Preferences' }).first().click()
+  let settingsPage = null
+  try {
+    settingsPage = await popupPromise
+  } catch {
+    settingsPage = null
+  }
+  const settingsMounted = settingsPage
+    ? await settingsPage
+        .waitForSelector('.pref-container', { timeout: 20000 })
+        .then(() => true)
+        .catch(() => false)
+    : false
+  check('preferences window opens', settingsMounted, settingsPage ? `url=${settingsPage.url()}` : 'no popup')
+  // The editor App must remain mounted in the original window.
+  const editorStillMounted = (await page.locator('.editor-container').count()) > 0
+  check('editor stays mounted while settings open', editorStillMounted)
+  if (settingsPage) await settingsPage.close()
+  await page.waitForTimeout(500)
+
+  // 9. After a settings round-trip, menu commands must still execute exactly
+  // once (regression: listener stacking made one click create 4+ tabs).
+  await menuButton.click()
+  await page.waitForTimeout(400)
+  const tabsBeforeSettings = await page.locator('.tabs-container li').count()
+  await page.locator('.web-menu-item', { hasText: 'File' }).first().hover()
+  await page.waitForTimeout(300)
+  await page.locator('.web-submenu .web-menu-item', { hasText: 'New Tab' }).first().click()
+  await page.waitForTimeout(600)
+  const tabsAfterSettings = await page.locator('.tabs-container li').count()
+  check(
+    'menu command executes once after settings round-trip',
+    tabsAfterSettings === tabsBeforeSettings + 1,
+    `tabs ${tabsBeforeSettings} -> ${tabsAfterSettings}`
+  )
+  await page.keyboard.press('Escape')
 } finally {
   const fatal = errors.filter((e) =>
     !/favicon|sourcemap|Download the React DevTools|Autofocus|favicon\.svg/i.test(e)

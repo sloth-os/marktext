@@ -10,9 +10,10 @@ import type { ManagedDocumentPayload, WindowInitialization } from './types'
 
 type Listener = (event: unknown, ...args: unknown[]) => void
 
-/** Registry of main→renderer event listeners, mirroring ipcRenderer.on. */
+/** Registry of same-window renderer listeners, mirroring ipcRenderer.on. */
 const listeners = new Map<string, Set<Listener>>()
 
+/** Same-window delivery, matching Electron's `webContents.send`. */
 export const emitToRenderer = (channel: string, ...args: unknown[]): void => {
   const set = listeners.get(channel)
   if (!set) return
@@ -24,6 +25,31 @@ export const emitToRenderer = (channel: string, ...args: unknown[]): void => {
     }
   }
 }
+
+// Desktop's main process broadcasts preference/keybinding changes to every
+// renderer window (e.g. from the settings window to the editor). The web
+// build mirrors that with a BroadcastChannel: the window that persists a
+// change emits it locally AND posts it; every other window relays the
+// message to its own renderer listeners.
+const SYNC_CHANNEL = 'mtweb-sync'
+type SyncMessage =
+  | { kind: 'preferences'; preferences: Record<string, unknown> }
+  | { kind: 'keybindings'; keybindings: Record<string, string> }
+
+const syncChannel: BroadcastChannel | null = typeof BroadcastChannel === 'function' ? new BroadcastChannel(SYNC_CHANNEL) : null
+
+const broadcastSync = (message: SyncMessage): void => {
+  syncChannel?.postMessage(message)
+}
+
+syncChannel?.addEventListener('message', (event) => {
+  const data = event.data as SyncMessage | undefined
+  if (data?.kind === 'preferences') {
+    emitToRenderer('mt::user-preference', data.preferences)
+  } else if (data?.kind === 'keybindings') {
+    emitToRenderer('mt::keybindings-response', data.keybindings)
+  }
+})
 
 const on = (channel: string, listener: Listener): (() => void) => {
   let set = listeners.get(channel)
@@ -616,9 +642,9 @@ async function handleSend(channel: string, args: unknown[]): Promise<void> {
     case 'set-user-preference': {
       const patch = args[0] as Record<string, unknown>
       webStateHost.updatePreferences(patch)
-      // Reflect back like the desktop's broadcast does.
+      // Reflect back like the desktop's broadcast (also to other windows).
+      broadcastSync({ kind: 'preferences', preferences: webStateHost.readPreferences() })
       emitToRenderer('mt::user-preference', webStateHost.readPreferences())
-      if (typeof patch.autoSave === 'boolean') return
       return
     }
     case 'mt::set-user-data':
@@ -803,6 +829,7 @@ async function handleInvoke(channel: string, args: unknown[]): Promise<unknown> 
       return webStateHost.readPreferences()
     case 'mt::preferences::update':
       webStateHost.updatePreferences(args[0] as Record<string, unknown>)
+      broadcastSync({ kind: 'preferences', preferences: webStateHost.readPreferences() })
       emitToRenderer('mt::user-preference', webStateHost.readPreferences())
       return { status: 'updated' }
     case 'mt::preferences::choose-directory':
@@ -830,6 +857,7 @@ async function handleInvoke(channel: string, args: unknown[]): Promise<unknown> 
       userKeybindings.clear()
       for (const [id, accelerator] of Object.entries(bindings)) userKeybindings.set(id, accelerator)
       store.writeJson('user-keybindings', Object.fromEntries(userKeybindings))
+      broadcastSync({ kind: 'keybindings', keybindings: activeKeybindings() })
       emitToRenderer('mt::keybindings-response', activeKeybindings())
       return true
     }

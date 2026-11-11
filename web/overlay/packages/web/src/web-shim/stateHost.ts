@@ -33,11 +33,24 @@ interface WebSessionState {
   layout: WindowCheckpointRequest['layout'] | null
   projectView: WindowCheckpointRequest['projectView'] | null
   recentDocuments: Array<{ pathname: string; isDirectory: boolean }>
+  /** Names of one-time state migrations already applied to this blob. */
+  migrations: string[]
 }
 
 const STATE_KEY = 'session-state'
 const PREFERENCE_KEY = 'user-preferences'
 const USER_DATA_KEY = 'user-data'
+
+/**
+ * One-time migration marker. The tab bar used to default to hidden — copied
+ * from upstream's `createDefaultLayout` (tabs are optional on desktop, where
+ * View > Toggle Tab Bar reveals them). On the web the tab strip is the only
+ * way to switch documents, so the default flipped to visible, and persisted
+ * layouts written by the old build are migrated once so returning sessions
+ * regain a usable tab bar. Toggles made after this migration are genuine user
+ * choices and are never touched again.
+ */
+const TABBAR_MIGRATION = 'tabbar-visible-default'
 
 const uuid = (): string =>
   typeof crypto.randomUUID === 'function'
@@ -51,7 +64,11 @@ const emptyState = (): WebSessionState => ({
   activeDocumentId: null,
   layout: null,
   projectView: null,
-  recentDocuments: []
+  recentDocuments: [],
+  // Stamp the marker at creation: a session created by this build must never
+  // be mistaken for a pre-fix blob, or a deliberate first-session tab-bar
+  // hide would be clobbered by the migration on the next load.
+  migrations: [TABBAR_MIGRATION]
 })
 
 let cachedState: WebSessionState | null = null
@@ -63,7 +80,17 @@ const loadState = (): WebSessionState => {
   // checkpoint, register-untitled, save — sees the SAME context token that
   // getWindowInitialization handed to the renderer.
  cachedState = loaded ?? emptyState()
-  if (!loaded) saveState(cachedState)
+  if (!loaded) {
+    saveState(cachedState)
+  } else if (!(cachedState.migrations ?? []).includes(TABBAR_MIGRATION)) {
+    // Session persisted by a build that defaulted the tab bar to hidden (the
+    // renderer's initial checkpoint baked that value in). Run once, then never
+    // again: later `tabBar.visible` values are the user's own View > Toggle
+    // Tab Bar choices and must survive reloads untouched.
+    cachedState.migrations = [...(cachedState.migrations ?? []), TABBAR_MIGRATION]
+    if (cachedState.layout?.tabBar) cachedState.layout.tabBar.visible = true
+    saveState(cachedState)
+  }
   return cachedState
 }
 const saveState = (state: WebSessionState): void => {
@@ -309,7 +336,10 @@ export const getWindowInitialization = async(): Promise<WindowInitialization> =>
     state.layout ?? {
       sidebar: { visible: false, activeView: 'files' as const, preferredWidthPx: 280, openedFiles: { expanded: true, preferredHeightPx: 112 } },
       outline: { visible: true, position: 'left' as const, preferredWidthPx: 220 },
-      tabBar: { visible: false },
+      // Web default differs from upstream: the tab strip is the only way to
+      // switch documents in a browser, so it must be visible on fresh
+      // sessions (desktop hides it because tabs are optional there).
+      tabBar: { visible: true },
       modes: { sourceCode: false, focus: false, typewriter: false }
     }
   return {

@@ -70,7 +70,15 @@ cd marktext/packages/web && pnpm exec vite preview
 
 # 4. Run the headless smoke test (app boot, editor, menus, SW, offline)
 cd marktext/packages/web && node test/smoke.mjs ../../dist
+
+# Focused regression tests (tab switching / persisted-layout migration)
+node test/repro-tab-switch.mjs local ../../dist
+node test/migration-check.mjs ../../dist
 ```
+
+The tests locate a usable Chromium on their own: the `CHROMIUM_EXECUTABLE`
+env var if set, then Playwright's expected revision if present on disk, then
+any `chromium-*/chrome-linux*/chrome` binary in the Playwright cache.
 
 Requirements: Node.js ≥ 22.12, pnpm ≥ 10 (`corepack enable pnpm`).
 
@@ -85,7 +93,13 @@ web/overlay/packages/web/   the web package (shim sources, PWA assets, Vite)
   src/bootstrap.ts          web entry point (installs bridge, boots renderer)
   src/web-shim/             browser implementation of the Electron bridge
   src/sw.ts                 custom service worker (offline precache)
-  test/smoke.mjs            headless browser smoke test
+  test/smoke.mjs            headless browser smoke test (boot, editor, menus,
+ tabs, SW, offline)
+  test/repro-tab-switch.mjs tab-switch regression test (new tab via menu,
+                            switch back to the old tab, reload restore)
+  test/migration-check.mjs  persisted-layout migration test (pre-fix session
+                            recovers a visible tab bar; deliberate toggles
+                            survive)
 .github/workflows/deploy.yml  weekly Pages deployment
 ```
 
