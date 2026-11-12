@@ -77,6 +77,9 @@ node test/migration-check.mjs ../../dist
 
 # Keyboard accelerators (Ctrl+A/C/V, Ctrl+1, Ctrl+K, Ctrl+Shift+P, …)
 node test/repro-accelerators.mjs ../../dist
+
+# Long-menu scrolling (overflowed submenus stay open and scrollable)
+node test/repro-menu-scroll.mjs ../../dist
 ```
 
 The tests locate a usable Chromium on their own: the `CHROMIUM_EXECUTABLE`
@@ -106,6 +109,8 @@ web/overlay/packages/web/   the web package (shim sources, PWA assets, Vite)
   test/repro-accelerators.mjs keyboard-accelerator test (Ctrl+A/C/V round-trip,
                             Ctrl+1 tab switch, Ctrl+K outline, Ctrl+Shift+P
                             palette, menu Edit actions)
+  test/repro-menu-scroll.mjs  long-menu test (overflowed submenus scroll
+                            without closing; viewport flipping)
 .github/workflows/deploy.yml  weekly Pages deployment
 ```
 

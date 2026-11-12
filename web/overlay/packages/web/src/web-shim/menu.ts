@@ -164,6 +164,15 @@ const buildMenu = (
           sub.style.left = `${rect.right}px`
           sub.style.top = `${rect.top}px`
           row.appendChild(sub)
+          // Flip/shift into the viewport: a long submenu opened near the
+          // bottom would otherwise overflow the screen.
+          const subRect = sub.getBoundingClientRect()
+          if (subRect.bottom > window.innerHeight) {
+            sub.style.top = `${Math.max(0, window.innerHeight - subRect.height - 8)}px`
+          }
+          if (subRect.right > window.innerWidth) {
+            sub.style.left = `${Math.max(0, rect.left - subRect.width)}px`
+          }
         })
         row.addEventListener('mouseleave', () => {
           row.querySelector('.web-submenu')?.remove()
@@ -215,16 +224,26 @@ export const popupWebMenu = (
     const onKey = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') closeWebMenu()
     }
-    const onAnyScroll = (): void => closeWebMenu()
+    // A long menu (or submenu) is scrollable — `max-height` + `overflow-y:
+    // auto` in the stylesheet. The window-level capture listener also sees
+    // those scroll events; closing on them made long menus impossible to
+    // scroll (the first wheel tick dismissed the menu). Only scrolls OUTSIDE
+    // the menu tree close it, like a native menu detaches when the window
+    // underneath scrolls.
+    const onAnyScroll = (event: Event): void => {
+      if (event.target instanceof Node && menu.contains(event.target)) return
+      closeWebMenu()
+    }
+    const onResize = (): void => closeWebMenu()
     document.addEventListener('mousedown', onOutside, true)
     document.addEventListener('keydown', onKey, true)
-    window.addEventListener('resize', onAnyScroll)
+    window.addEventListener('resize', onResize)
     window.addEventListener('scroll', onAnyScroll, true)
     const previousClose = closeHandler
     closeHandler = () => {
       document.removeEventListener('mousedown', onOutside, true)
       document.removeEventListener('keydown', onKey, true)
-      window.removeEventListener('resize', onAnyScroll)
+      window.removeEventListener('resize', onResize)
       window.removeEventListener('scroll', onAnyScroll, true)
       previousClose?.()
     }

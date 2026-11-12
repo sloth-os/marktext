@@ -144,9 +144,10 @@ jobs:
           npx playwright install chromium --with-deps || npx playwright install chromium
           CHROMIUM="$(find ~/.cache/ms-playwright -name chrome -type f | head -1)"
           CHROMIUM_EXECUTABLE="$CHROMIUM" node test/smoke.mjs "$GITHUB_WORKSPACE/marktext/dist"
-          # Accelerator regressions (Ctrl+A/C/V, Ctrl+1, Ctrl+K, Ctrl+Shift+P)
-          # and the tab-switch / layout-migration suites.
+          # Accelerator regressions (Ctrl+A/C/V, Ctrl+1, Ctrl+K, Ctrl+Shift+P),
+          # long-menu scrolling, and the tab-switch / layout-migration suites.
           CHROMIUM_EXECUTABLE="$CHROMIUM" node test/repro-accelerators.mjs "$GITHUB_WORKSPACE/marktext/dist"
+          CHROMIUM_EXECUTABLE="$CHROMIUM" node test/repro-menu-scroll.mjs "$GITHUB_WORKSPACE/marktext/dist"
           CHROMIUM_EXECUTABLE="$CHROMIUM" node test/repro-tab-switch.mjs local "$GITHUB_WORKSPACE/marktext/dist"
           CHROMIUM_EXECUTABLE="$CHROMIUM" node test/migration-check.mjs "$GITHUB_WORKSPACE/marktext/dist"
 
