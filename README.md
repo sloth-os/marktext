@@ -74,6 +74,9 @@ cd marktext/packages/web && node test/smoke.mjs ../../dist
 # Focused regression tests (tab switching / persisted-layout migration)
 node test/repro-tab-switch.mjs local ../../dist
 node test/migration-check.mjs ../../dist
+
+# Keyboard accelerators (Ctrl+A/C/V, Ctrl+1, Ctrl+K, Ctrl+Shift+P, …)
+node test/repro-accelerators.mjs ../../dist
 ```
 
 The tests locate a usable Chromium on their own: the `CHROMIUM_EXECUTABLE`
@@ -100,6 +103,9 @@ web/overlay/packages/web/   the web package (shim sources, PWA assets, Vite)
   test/migration-check.mjs  persisted-layout migration test (pre-fix session
                             recovers a visible tab bar; deliberate toggles
                             survive)
+  test/repro-accelerators.mjs keyboard-accelerator test (Ctrl+A/C/V round-trip,
+                            Ctrl+1 tab switch, Ctrl+K outline, Ctrl+Shift+P
+                            palette, menu Edit actions)
 .github/workflows/deploy.yml  weekly Pages deployment
 ```
 

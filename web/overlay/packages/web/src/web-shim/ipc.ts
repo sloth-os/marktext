@@ -119,17 +119,207 @@ const activeKeybindings = (): Record<string, string> => {
   return merged
 }
 
+// ---------------------------------------------------------------------------
+// Command dispatch parity with the desktop MAIN process.
+//
+// On desktop, accelerators are executed by the main-process CommandManager
+// (keyboard/shortcutHandler.ts → main/menu/actions/*), NOT the renderer's
+// command center. Many command ids never reach `mt::execute-command-by-id`;
+// the menu action sends a dedicated ipc channel instead (or performs a native
+// clipboard op). Routing those ids to the command center throws
+// `Cannot execute command "…" because it's missing` — Ctrl+A, Ctrl+C/V,
+// Ctrl+1..0, Ctrl+K, Ctrl+Shift+P and friends silently did nothing on web.
+// This table mirrors the desktop registrations:
+//   - main/menu/actions/edit.ts   (loadEditCommands)
+//   - main/menu/actions/view.ts   (loadViewCommands)
+//   - main/menu/actions/file.ts   (exportPDF)
+//   - main/commands/tab.ts        (tab switching/cycling)
+//   - main/windows/utils.ts       (zoom)
+// ---------------------------------------------------------------------------
+
+/** How a command id must be dispatched: 'renderer' = command center,
+ * 'handled' = dispatched here, 'native' = leave to the browser (no
+ * preventDefault). */
+type DispatchResult = 'renderer' | 'handled' | 'native'
+
+const TAB_INDEX_COMMANDS: Record<string, number> = {
+  'tabs.switchToFirst': 0,
+  'tabs.switchToSecond': 1,
+  'tabs.switchToThird': 2,
+  'tabs.switchToFourth': 3,
+  'tabs.switchToFifth': 4,
+  'tabs.switchToSixth': 5,
+  'tabs.switchToSeventh': 6,
+  'tabs.switchToEighth': 7,
+  'tabs.switchToNinth': 8,
+  'tabs.switchToTenth': 9
+}
+
+// Tracks the zoom factor the renderer last applied via webFrame.setZoomFactor
+// (store/editor.ts EDIT_ZOOM), so zoomIn/zoomOut can compute relative steps
+// like desktop's webContents.getZoomFactor().
+let currentZoomFactor = 1
+
+const applyZoom = (factor: number): void => {
+  emitToRenderer('mt::window-zoom', Number(factor.toFixed(3)))
+}
+
+// Menu Edit > Paste has no keydown to piggyback on, so read the system
+// clipboard and re-dispatch a paste event muya's document-level handler
+// consumes (it checks `'clipboardData' in event`, see muya/src/clipboard).
+const pasteFromSystemClipboard = async(): Promise<void> => {
+  try {
+    const text = await navigator.clipboard.readText()
+    if (!text) return
+    const dataTransfer = new DataTransfer()
+    dataTransfer.setData('text/plain', text)
+    document.dispatchEvent(
+      new ClipboardEvent('paste', { clipboardData: dataTransfer, bubbles: true, cancelable: true })
+    )
+  } catch {
+    console.warn('[web-shim] Edit > Paste needs the browser clipboard-read permission')
+  }
+}
+
+// Desktop parity: a native Electron menu is an OS overlay, so the editor keeps
+// focus across opening the menu and clicking an item. An HTML menu steals it
+// twice — the hamburger button takes focus on mousedown, and removing the menu
+// DOM leaves activeElement on document.body — so focus-dependent actions
+// (Select All, Paste, the clipboard variants, all gated on `muya.hasFocus()`)
+// become no-ops. Track the last element focused OUTSIDE the menu chrome and
+// restore it before dispatching a menu command.
+let lastFocusBeforeMenu: HTMLElement | null = null
+const isMenuChrome = (element: Element | null): boolean =>
+  !!element?.closest?.('.web-menu, .web-submenu, .frameless-titlebar-menu')
+const trackFocusForMenu = (): void => {
+  if (trackFocusForMenu.attached) return
+  trackFocusForMenu.attached = true
+  document.addEventListener('focusin', (event) => {
+    const target = event.target as HTMLElement | null
+    if (target && !isMenuChrome(target)) lastFocusBeforeMenu = target
+  }, true)
+}
+trackFocusForMenu.attached = false
+
+/** Restores editor focus before running a menu command (see trackFocusForMenu). */
+const restoreFocusBeforeMenuCommand = (): void => {
+  const target = lastFocusBeforeMenu
+  if (target && document.contains(target) && typeof target.focus === 'function') {
+    try {
+      target.focus({ preventScroll: true })
+    } catch {
+      // Focus restoration is best-effort.
+    }
+  }
+}
+
+const dispatchCommandById = (id: string, source: 'keyboard' | 'menu'): DispatchResult => {
+  switch (id) {
+    // Desktop: menu role cut/copy/paste → webContents.cut()/copy()/paste(),
+    // which fire real clipboard events in the renderer. Muya listens for
+    // copy/cut/paste on `document`, so on keydown the browser's native
+    // handling IS the desktop behavior — intercepting it (as the old build
+    // did) both threw "command missing" and suppressed the event.
+    case 'edit.cut':
+    case 'edit.copy':
+    case 'edit.paste':
+      if (source === 'keyboard') return 'native'
+      if (id === 'edit.paste') {
+        void pasteFromSystemClipboard()
+      } else {
+        document.execCommand(id === 'edit.cut' ? 'cut' : 'copy')
+      }
+      return 'handled'
+    // Desktop: edit(win, type) → 'mt::editor-edit-action' → listenForMain
+    // EDITOR_EDIT_ACTION → bus event consumed by editor.vue / search UI.
+    case 'edit.copy-as-rich':
+      emitToRenderer('mt::editor-edit-action', 'copyAsRich')
+      return 'handled'
+    case 'edit.copy-as-html':
+      emitToRenderer('mt::editor-edit-action', 'copyAsHtml')
+      return 'handled'
+    case 'edit.paste-as-plaintext':
+      emitToRenderer('mt::editor-edit-action', 'pasteAsPlainText')
+      return 'handled'
+    case 'edit.select-all':
+      emitToRenderer('mt::editor-edit-action', 'selectAll')
+      return 'handled'
+    case 'edit.find-next':
+      emitToRenderer('mt::editor-edit-action', 'findNext')
+      return 'handled'
+    case 'edit.find-previous':
+      emitToRenderer('mt::editor-edit-action', 'findPrev')
+      return 'handled'
+    case 'edit.screenshot':
+      // Screen capture is not available to browsers; swallow like desktop
+      // does on non-macOS platforms.
+      return 'handled'
+    // Desktop: main/menu/actions/view.ts sends dedicated channels.
+    case 'view.command-palette':
+      emitToRenderer('mt::show-command-palette')
+      return 'handled'
+    case 'view.toggle-toc':
+      emitToRenderer('mt::toggle-view-layout-entry', 'showToc')
+      return 'handled'
+    case 'view.reload-images':
+      emitToRenderer('mt::invalidate-image-cache')
+      return 'handled'
+    // Debug-only on desktop (gated behind MARKTEXT_DEBUG → normally inert).
+    // Let the browser handle them: Ctrl+F5 reloads, Ctrl+Alt+I opens devtools.
+    case 'view.toggle-dev-tools':
+    case 'view.dev-reload':
+      return 'native'
+    // Desktop: main/commands/tab.ts.
+    case 'tabs.switchToLeft':
+      emitToRenderer('mt::tabs-cycle-left')
+      return 'handled'
+    case 'tabs.switchToRight':
+      emitToRenderer('mt::tabs-cycle-right')
+      return 'handled'
+    // Desktop: exportPDF → 'mt::show-export-dialog' (listenForMain).
+    case 'file.export-file.pdf':
+      emitToRenderer('mt::show-export-dialog', 'pdf')
+      return 'handled'
+    // Desktop: main/windows/utils.ts zoom steps (0.5 … 2.0, ±0.125).
+    case 'window.zoomIn':
+      applyZoom(Math.min(2.0, currentZoomFactor + 0.125))
+      return 'handled'
+    case 'window.zoomOut':
+      applyZoom(Math.max(0.5, currentZoomFactor - 0.125))
+      return 'handled'
+    case 'window.resetZoom':
+      applyZoom(1.0)
+      return 'handled'
+    // Desktop app window management — no browser equivalent.
+    case 'mt.hide':
+    case 'mt.hide-others':
+      return 'handled'
+    default:
+      break
+  }
+  const tabIndex = TAB_INDEX_COMMANDS[id]
+  if (tabIndex !== undefined) {
+    emitToRenderer('mt::switch-tab-by-index', tabIndex)
+    return 'handled'
+  }
+  // Everything else is registered in the renderer command center
+  // (static commands/index.ts or runtime cmd::register-command), exactly
+  // like desktop's main → 'mt::execute-command-by-id' forward.
+  return 'renderer'
+}
+
 /** Attaches the global keyboard shortcut handler (replaces localShortcut). */
 export const attachGlobalShortcuts = (executeCommand: (id: string) => void): void => {
   if (attachGlobalShortcuts.attached) return
   attachGlobalShortcuts.attached = true
   window.addEventListener('keydown', (event: KeyboardEvent) => {
-    // The desktop build routes every accelerator through the application menu
-    // (Electron localShortcut intercepts before-input-event), even while the
-    // editor has focus — the renderer's command pipeline then performs the
-    // edit actions itself (edit.copy/paste/undo...). Mirror that: all
-    // accelerator matches are intercepted regardless of focus. Plain typing
-    // is unaffected because every accelerator carries a modifier key.
+    // The desktop build intercepts every accelerator before Chromium does
+    // (electronLocalshortcut on before-input-event), even while the editor
+    // has focus, and runs the MAIN-process command. Mirror that: all
+    // accelerator matches are intercepted regardless of focus — except the
+    // ones desktop implements as native clipboard/devtools behavior, which
+    // must reach the browser un-prevented. Plain typing is unaffected
+    // because every accelerator carries a modifier or function key.
     const key = [
       event.ctrlKey ? 'Control' : '',
       event.altKey ? 'Alt' : '',
@@ -140,8 +330,10 @@ export const attachGlobalShortcuts = (executeCommand: (id: string) => void): voi
 
     for (const [id, accelerator] of Object.entries(activeKeybindings())) {
       if (acceleratorToBrowser(accelerator) === key) {
+        const result = dispatchCommandById(id, 'keyboard')
+        if (result === 'native') return
         event.preventDefault()
-        executeCommand(id)
+        if (result === 'renderer') executeCommand(id)
         return
       }
     }
@@ -1045,6 +1237,9 @@ const electron = {
   fetchLinkHtml: (url: string) => handleInvoke('mt::link::fetch-html', [url]) as Promise<string>,
   webFrame: {
     setZoomFactor: (factor: number) => {
+      // Track the renderer's last applied factor so window.zoomIn/zoomOut can
+      // compute relative steps like desktop's webContents.getZoomFactor().
+      currentZoomFactor = factor
       document.documentElement.style.fontSize = `${Math.round(factor * 100)}%`
     },
     setZoomLevel: () => {}
@@ -1082,7 +1277,11 @@ const electron = {
         popupWebMenu(
           (template ?? []) as Parameters<typeof popupWebMenu>[0],
           position,
-          id => emitToRenderer('mt::menu::click', { id }),
+          id => {
+            // Native context menus don't steal focus; the HTML one does.
+            restoreFocusBeforeMenuCommand()
+            emitToRenderer('mt::menu::click', { id })
+          },
           () => emitToRenderer('mt::menu::closed')
         )
       })()
@@ -1093,16 +1292,23 @@ const electron = {
         // actions; the command palette covers the same surface on the web.
         const { popupWebMenu } = await import('./menu')
         const { getApplicationMenuTemplate } = await import('./appMenu')
+        trackFocusForMenu()
         popupWebMenu(
           getApplicationMenuTemplate(),
           position,
           id => {
             if (id === 'mt::open-settings') {
               dispatchAppCommand('open-settings')
-            } else if (id === 'mt::show-command-palette') {
+              return
+            }
+            restoreFocusBeforeMenuCommand()
+            if (id === 'mt::show-command-palette') {
               emitToRenderer('mt::show-command-palette')
             } else {
-              emitToRenderer('mt::execute-command-by-id', id)
+              // Same dispatch parity as accelerators: main-process ids go to
+              // their dedicated channels, the rest to the command center.
+              const result = dispatchCommandById(id, 'menu')
+              if (result === 'renderer') emitToRenderer('mt::execute-command-by-id', id)
             }
           },
           () => emitToRenderer('mt::menu::closed')
@@ -1136,6 +1342,9 @@ const commandExists = {
 export const installWebBridge = (): void => {
   const target = window as unknown as Record<string, unknown>
   target.electron = electron
+  // Track editor focus from boot so menu commands can restore it (see
+  // trackFocusForMenu / restoreFocusBeforeMenuCommand).
+  trackFocusForMenu()
   target.path = posixPath
   target.fileUtils = fileUtils
   target.i18nUtils = i18nUtils
